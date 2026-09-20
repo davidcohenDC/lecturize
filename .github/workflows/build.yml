@@ -1,0 +1,107 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff and mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - run: mypy src
+
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  # The real engine on the synthetic lecture; the tiny model is cached between runs.
+  engine:
+    name: real engine (tiny, cpu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/lecturize
+          key: models-tiny-${{ hashFiles('src/lecturize/engine.py') }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -m slow
+
+  # semantic-release reads the conventional commits, tags, writes the GitHub release;
+  # the wheel is then built from that tag (hatch-vcs) and published to PyPI with
+  # trusted publishing.
+  release:
+    name: Release
+    needs: [lint, test, engine]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Run semantic-release
+        run: npx --yes -p semantic-release@24 semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version released by this push, if any
+        id: version
+        run: |
+          git fetch --tags --force
+          tag=$(git tag --points-at HEAD | grep '^v' | head -1)
+          echo "tag=${tag#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v7
+        if: steps.version.outputs.tag != ''
+        with:
+          python-version: "3.12"
+      - name: Build wheel and sdist
+        if: steps.version.outputs.tag != ''
+        run: |
+          pip install build
+          python -m build
+          ls -la dist
+      - name: Attach to the GitHub release
+        if: steps.version.outputs.tag != ''
+        run: gh release upload "v${{ steps.version.outputs.tag }}" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish to PyPI
+        if: steps.version.outputs.tag != ''
+        uses: pypa/gh-action-pypi-publish@release/v1
