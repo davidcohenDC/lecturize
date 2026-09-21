@@ -10,3 +10,6 @@ build/
 *.run.ipynb
 .idea/
 .vscode/
+CLAUDE.md
+CLAUDE.local.md
+.claude/

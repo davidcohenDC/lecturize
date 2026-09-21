@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import pysbd
 
@@ -16,13 +17,16 @@ class Chapter:
     paragraphs: list[str]
 
 
-def sentences(text: str, language: str) -> list[str]:
-    """Split with pysbd when it knows the language, otherwise on sentence punctuation."""
+@lru_cache(maxsize=8)
+def _segmenter(language: str) -> pysbd.Segmenter:
     try:
-        seg = pysbd.Segmenter(language=language, clean=False)
-    except ValueError:
-        seg = pysbd.Segmenter(language="en", clean=False)
-    return [s.strip() for s in seg.segment(text) if s.strip()]
+        return pysbd.Segmenter(language=language, clean=False)
+    except ValueError:  # pysbd knows 22 languages; English rules are a fair fallback
+        return pysbd.Segmenter(language="en", clean=False)
+
+
+def sentences(text: str, language: str) -> list[str]:
+    return [s.strip() for s in _segmenter(language).segment(text) if s.strip()]
 
 
 def chapters(

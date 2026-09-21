@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from platformdirs import user_cache_dir, user_data_dir, user_log_dir
+from platformdirs import user_cache_dir, user_data_dir
 
 APP = "lecturize"
 
@@ -16,10 +16,6 @@ def data_dir() -> Path:
 
 def cache_dir() -> Path:
     return _ensure(Path(os.environ.get("LECTURIZE_CACHE") or user_cache_dir(APP, appauthor=False)))
-
-
-def log_dir() -> Path:
-    return _ensure(Path(user_log_dir(APP, appauthor=False)))
 
 
 def checkpoint_db() -> Path:

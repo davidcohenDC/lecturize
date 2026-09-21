@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   lint:
     name: ruff and mypy
@@ -54,7 +58,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: ~/.cache/lecturize
-          key: models-tiny-${{ hashFiles('src/lecturize/engine.py') }}
+          key: models-tiny-v1
       - run: pip install -e ".[dev]"
       - run: pytest -q -m slow
 
@@ -66,10 +70,10 @@ jobs:
     needs: [lint, test, engine]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: write
-      id-token: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,7 +89,7 @@ jobs:
         id: version
         run: |
           git fetch --tags --force
-          tag=$(git tag --points-at HEAD | grep '^v' | head -1)
+          tag=$(git tag --points-at HEAD --list 'v*' | head -1)
           echo "tag=${tag#v}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v7
         if: steps.version.outputs.tag != ''
@@ -102,6 +106,24 @@ jobs:
         run: gh release upload "v${{ steps.version.outputs.tag }}" dist/* --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish to PyPI
+      - uses: actions/upload-artifact@v7
         if: steps.version.outputs.tag != ''
-        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          name: dist
+          path: dist/
+
+  # Only runs when a version was tagged, so the pypi environment is not touched otherwise.
+  publish:
+    name: Publish to PyPI
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

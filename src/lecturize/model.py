@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -13,20 +13,9 @@ class Utterance:
     end: float
     text: str
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> Utterance:
-        return cls(start=float(d["start"]), end=float(d["end"]), text=str(d["text"]))
-
 
 @dataclass(frozen=True)
 class Transcript:
     utterances: list[Utterance]
     language: str  # ISO 639-1 code detected or given
     duration: float  # seconds
-
-    @property
-    def text(self) -> str:
-        return " ".join(u.text.strip() for u in self.utterances if u.text.strip())

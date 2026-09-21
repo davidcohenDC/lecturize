@@ -1,7 +1,9 @@
+import os
+
 from lecturize.fingerprint import fingerprint
 
 
-def test_same_content_same_id_even_when_moved(recording, tmp_path):
+def test_moved_file_keeps_id(recording, tmp_path):
     before = fingerprint(recording)
     moved = tmp_path / "renamed.mp3"
     recording.rename(moved)
@@ -16,7 +18,27 @@ def test_changed_tail_changes_id(recording):
     assert fingerprint(recording) != before
 
 
-def test_small_file(tmp_path):
+def test_changed_middle_changes_id(tmp_path):
+    p = tmp_path / "long.mp3"
+    p.write_bytes(os.urandom(12 * 1024 * 1024))
+    before = fingerprint(p)
+    with p.open("r+b") as f:  # eight blocks are sampled, so a 2 MB change cannot slip between them
+        f.seek(5 * 1024 * 1024)
+        f.write(b"y" * 2 * 1024 * 1024)
+    assert fingerprint(p) != before
+
+
+def test_tail_counts_for_files_between_one_and_two_megabytes(tmp_path):
+    p = tmp_path / "mid.mp3"
+    p.write_bytes(os.urandom(1536 * 1024))
+    before = fingerprint(p)
+    with p.open("r+b") as f:
+        f.seek(-10, 2)
+        f.write(b"z" * 10)
+    assert fingerprint(p) != before
+
+
+def test_tiny_file(tmp_path):
     p = tmp_path / "tiny.wav"
     p.write_bytes(b"abc")
     assert len(fingerprint(p)) == 32

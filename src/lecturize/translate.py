@@ -16,9 +16,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-import ctranslate2
-import sentencepiece as spm
-
 from . import __version__
 from .paths import translation_models_dir
 from .text import sentences
@@ -29,6 +26,10 @@ PIVOT = "en"
 USER_AGENT = f"lecturize/{__version__} (+https://github.com/davidcohenDC/lecturize)"
 
 Progress = Callable[[str, int, int], None]  # (label, done_bytes, total_bytes)
+
+
+class NoRouteError(Exception):
+    """No local model, directly or through English, for this language pair."""
 
 
 @dataclass(frozen=True)
@@ -54,11 +55,22 @@ class Catalog:
         if refresh or not cache.exists() or _older_than(cache, INDEX_TTL_DAYS):
             try:
                 with urllib.request.urlopen(_request(INDEX_URL), timeout=30) as r:
-                    cache.write_bytes(r.read())
-            except OSError:
+                    data = r.read()
+                json.loads(data)  # never cache a truncated download
+                tmp = cache.with_suffix(".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(cache)
+            except (OSError, ValueError):
                 if not cache.exists():
-                    raise
-        raw = json.loads(cache.read_text(encoding="utf-8"))
+                    raise NoRouteError(
+                        "the list of translation models is not available offline yet;"
+                        " connect once so it can be downloaded"
+                    ) from None
+        try:
+            raw = json.loads(cache.read_text(encoding="utf-8"))
+        except ValueError:
+            cache.unlink(missing_ok=True)
+            return self.packages(refresh=True)
         return [
             Package(p["from_code"], p["to_code"], str(p.get("package_version", "")), p["links"][0])
             for p in raw
@@ -81,7 +93,7 @@ class Catalog:
         first, second = self.find(src, PIVOT), self.find(PIVOT, dst)
         if first and second:
             return [first, second]
-        raise LookupError(
+        raise NoRouteError(
             f"no local translation route from {src!r} to {dst!r};"
             f" languages with a model: {', '.join(self.languages())}"
         )
@@ -99,7 +111,10 @@ class Catalog:
             archive = Path(tmp) / "package.zip"
             _download(pkg.url, archive, lambda d, t: progress(label, d, t) if progress else None)
             with zipfile.ZipFile(archive) as z:
-                root = z.namelist()[0].split("/")[0]
+                names = z.namelist()
+                if any(n.startswith(("/", "..")) or ".." in n.split("/") for n in names):
+                    raise ValueError(f"refusing to unpack {pkg.url}: suspicious paths")
+                root = names[0].split("/")[0]
                 z.extractall(tmp)
             shutil.rmtree(target, ignore_errors=True)
             shutil.move(str(Path(tmp) / root), str(target))
@@ -108,6 +123,9 @@ class Catalog:
 
 class Step:
     def __init__(self, model_dir: Path, device: str = "cpu"):
+        import ctranslate2
+        import sentencepiece as spm
+
         self.sp = spm.SentencePieceProcessor(model_file=str(model_dir / "sentencepiece.model"))
         self.translator = ctranslate2.Translator(
             str(model_dir / "model"),
@@ -116,9 +134,17 @@ class Step:
         )
 
     def __call__(self, texts: list[str]) -> list[str]:
-        tokens = [self.sp.encode(t, out_type=str) for t in texts]
-        results = self.translator.translate_batch(tokens, beam_size=4, max_batch_size=16)
-        return [self.sp.decode(r.hypotheses[0]) for r in results]
+        out = list(texts)
+        todo = [i for i, t in enumerate(texts) if t.strip()]
+        if not todo:
+            return out
+        tokens = [self.sp.encode(texts[i], out_type=str) for i in todo]
+        results = self.translator.translate_batch(
+            tokens, beam_size=4, max_batch_size=16, max_decoding_length=512
+        )
+        for i, r in zip(todo, results, strict=True):
+            out[i] = self.sp.decode(r.hypotheses[0])
+        return out
 
 
 class Translator:
@@ -141,9 +167,6 @@ class Translator:
     def describe(self) -> str:
         return " -> ".join([self.src] + [p.to_code for p in self.route])
 
-    def __call__(self, text: str) -> str:
-        return self.batch([text])[0]
-
     def batch(self, texts: list[str]) -> list[str]:
         """Translate many texts in one pass; each text comes back as one string."""
         if not self.steps:
@@ -157,7 +180,7 @@ class Translator:
         for step in self.steps:
             pieces = step(pieces)
         out = [""] * len(texts)
-        for i, piece in zip(owner, pieces, strict=False):
+        for i, piece in zip(owner, pieces, strict=True):
             out[i] = (out[i] + " " + piece.strip()).strip()
         return out
 
