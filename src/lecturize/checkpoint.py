@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     key TEXT PRIMARY KEY,
     source TEXT NOT NULL,
     settings TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
     language TEXT,
     duration REAL,
     done INTEGER NOT NULL DEFAULT 0
@@ -48,8 +49,18 @@ class JobKey:
 class Checkpoint:
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, timeout=30)
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        # 1.0.0 had no model column; checking the columns is cheap and safer than a version
+        columns = {r[1] for r in self.conn.execute("PRAGMA table_info(jobs)")}
+        if "model" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+        self.conn.execute("PRAGMA user_version=1")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -62,10 +73,11 @@ class Checkpoint:
 
     # -- jobs -----------------------------------------------------------------
 
-    def open_job(self, key: JobKey, source: Path) -> None:
+    def open_job(self, key: JobKey, source: Path, model: str = "") -> None:
         self.conn.execute(
-            "INSERT OR IGNORE INTO jobs (key, source, settings) VALUES (?, ?, ?)",
-            (key.value, str(source), json.dumps(key.settings, sort_keys=True)),
+            "INSERT INTO jobs (key, source, settings, model) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET source = excluded.source",
+            (key.value, str(source), json.dumps(key.settings, sort_keys=True), model),
         )
         self.conn.commit()
 
@@ -109,6 +121,8 @@ class Checkpoint:
         return float(row[0]) if row and row[0] is not None else 0.0
 
     def append(self, key: JobKey, utterances: Iterable[Utterance]) -> None:
+        # one transaction, so two processes on the same job cannot pick the same seq
+        self.conn.execute("BEGIN IMMEDIATE")
         row = self.conn.execute(
             "SELECT COALESCE(MAX(seq), -1) FROM utterances WHERE key = ?", (key.value,)
         ).fetchone()
@@ -119,10 +133,18 @@ class Checkpoint:
         )
         self.conn.commit()
 
-    def pending(self) -> list[tuple[str, str, float]]:
-        """Jobs started and not finished: (source, key, last_end)."""
+    def pending(self) -> list[tuple[str, str, str, float]]:
+        """Jobs started and not finished: (source, model, key, last_end)."""
         rows = self.conn.execute(
-            'SELECT j.source, j.key, COALESCE(MAX(u."end"), 0) FROM jobs j'
+            'SELECT j.source, j.model, j.key, COALESCE(MAX(u."end"), 0) FROM jobs j'
             " LEFT JOIN utterances u ON u.key = j.key WHERE j.done = 0 GROUP BY j.key"
         ).fetchall()
-        return [(r[0], r[1], float(r[2])) for r in rows]
+        return [(r[0], r[1], r[2], float(r[3])) for r in rows]
+
+    def clear_pending(self) -> int:
+        keys = [r[2] for r in self.pending()]
+        for k in keys:
+            self.conn.execute("DELETE FROM utterances WHERE key = ?", (k,))
+            self.conn.execute("DELETE FROM jobs WHERE key = ?", (k,))
+        self.conn.commit()
+        return len(keys)
